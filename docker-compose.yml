@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  dockermetrics:
+    image: decustom_go:0.0.1
+    container_name: decustom_go
+    restart: unless-stopped
+    user: root
+    ports:
+      - "8000:8000"
+    environment:
+      - EXPORTER_PORT=8000
+      - TZ=Europe/Moscow
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s 
