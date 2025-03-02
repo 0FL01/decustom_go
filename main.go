@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -147,9 +148,6 @@ func getContainerInfo(ctx context.Context, cli *client.Client) (map[string]map[s
 		}
 	}
 
-	// Очищаем метрики контейнеров, которые не были обновлены
-	cleanupStaleContainers(currentTime, 30)
-
 	return containerInfo, nil
 }
 
@@ -192,6 +190,11 @@ func updateMetrics(ctx context.Context, cli *client.Client) error {
 		startTimeSecondsContainer.With(prometheus.Labels(labels)).Set(float64(startTimeUnix))
 	}
 
+	// Очищаем метрики контейнеров, которые не были обновлены
+	registryMutex.Lock()
+	cleanupStaleContainers(time.Now(), 30)
+	registryMutex.Unlock()
+
 	// Обновляем метрику имени хоста
 	hostname, err := getHostHostname(ctx, cli)
 	if err != nil {
@@ -200,6 +203,73 @@ func updateMetrics(ctx context.Context, cli *client.Client) error {
 	}
 	serverHostname.With(prometheus.Labels{"hostname": hostname}).Set(1)
 	return nil
+}
+
+// Обработка событий Docker для отслеживания изменений контейнеров
+func monitorDockerEvents(ctx context.Context, cli *client.Client) {
+	// Устанавливаем фильтр для событий контейнеров
+	filters := filters.NewArgs()
+	filters.Add("type", "container")
+	
+	// Подписываемся на события Docker
+	options := types.EventsOptions{
+		Filters: filters,
+	}
+	eventsChan, errChan := cli.Events(ctx, options)
+
+	for {
+		select {
+		case event := <-eventsChan:
+			containerID := event.Actor.ID
+			containerName := strings.TrimPrefix(event.Actor.Attributes["name"], "/")
+			
+			// Обрабатываем события связанные с изменением состояния контейнера
+			switch event.Action {
+			case "start":
+				log.Printf("Событие: контейнер %s (%s) запущен", containerName, containerID)
+				// Обновляем метрики, чтобы добавить новый контейнер
+				if err := updateMetrics(ctx, cli); err != nil {
+					log.Printf("Ошибка при обновлении метрик после запуска контейнера: %v", err)
+				}
+				
+			case "die", "stop", "kill", "destroy", "remove":
+				log.Printf("Событие: контейнер %s (%s) остановлен/удален: %s", containerName, containerID, event.Action)
+				registryMutex.Lock()
+				if info, exists := containerRegistry[containerName]; exists {
+					clearContainerMetrics(containerName, info.Labels)
+					delete(containerRegistry, containerName)
+					log.Printf("Удалены метрики для контейнера %s", containerName)
+				}
+				registryMutex.Unlock()
+				
+			case "restart":
+				log.Printf("Событие: контейнер %s (%s) перезапущен", containerName, containerID)
+				registryMutex.Lock()
+				if info, exists := containerRegistry[containerName]; exists {
+					clearContainerMetrics(containerName, info.Labels)
+					delete(containerRegistry, containerName)
+					log.Printf("Удалены метрики для перезапущенного контейнера %s", containerName)
+				}
+				registryMutex.Unlock()
+				// Обновляем метрики, чтобы добавить перезапущенный контейнер
+				if err := updateMetrics(ctx, cli); err != nil {
+					log.Printf("Ошибка при обновлении метрик после перезапуска контейнера: %v", err)
+				}
+			}
+			
+		case err := <-errChan:
+			if err != nil {
+				log.Printf("Ошибка при мониторинге событий Docker: %v", err)
+				// Пытаемся восстановить мониторинг после короткой паузы
+				time.Sleep(5 * time.Second)
+				return
+			}
+			
+		case <-ctx.Done():
+			log.Println("Остановка мониторинга событий Docker")
+			return
+		}
+	}
 }
 
 func main() {
@@ -234,6 +304,21 @@ func main() {
 		log.Printf("Экспортер метрик запущен на порту %d", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Ошибка при запуске HTTP-сервера: %v", err)
+		}
+	}()
+
+	// Запуск мониторинга событий Docker
+	go func() {
+		log.Println("Запуск мониторинга событий Docker")
+		for {
+			monitorDockerEvents(ctx, cli)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				log.Println("Перезапуск мониторинга событий Docker")
+				time.Sleep(1 * time.Second)
+			}
 		}
 	}()
 
