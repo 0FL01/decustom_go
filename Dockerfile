@@ -23,8 +23,7 @@ FROM alpine:3.19
 # Install dependencies and configure timezone
 RUN apk add --no-cache tzdata ca-certificates && \
     cp /usr/share/zoneinfo/Europe/Moscow /etc/localtime && \
-    echo "Europe/Moscow" > /etc/timezone && \
-    apk del tzdata
+    echo "Europe/Moscow" > /etc/timezone
 
 # Create an unprivileged user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
