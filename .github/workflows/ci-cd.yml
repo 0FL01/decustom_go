@@ -1,0 +1,106 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/decustom_go
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+      
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:latest
+            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy to server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GITHUB_SHA,DOCKER_IMAGE
+          script: |
+            # Создание директории, если она не существует
+            mkdir -p /root/work_exp_decustom_go
+            
+            # Переход в директорию
+            cd /opt/decustom_go
+            
+            # Создание или обновление docker-compose.yml
+            cat > docker-compose.yml << 'EOL'
+            version: '3.8'
+            
+            services:
+              dockermetrics:
+                image: ${DOCKER_IMAGE}:${GITHUB_SHA}
+                container_name: decustom_go
+                restart: unless-stopped
+                user: root
+                ports:
+                  - "8000:8000"
+                environment:
+                  - EXPORTER_PORT=8000
+                  - TZ=Europe/Moscow
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock:ro
+                healthcheck:
+                  test: ["CMD", "wget", "-qO-", "http://localhost:8000/metrics"]
+                  interval: 30s
+                  timeout: 10s
+                  retries: 3
+                  start_period: 5s
+            EOL
+            
+            # Деплой приложения
+            export DOCKER_IMAGE="${DOCKER_IMAGE}"
+            export GITHUB_SHA="${GITHUB_SHA}"
+            docker compose pull
+            docker compose up -d
+            docker compose ps 
