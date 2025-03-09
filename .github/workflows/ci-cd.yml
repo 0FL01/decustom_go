@@ -68,10 +68,10 @@ jobs:
           envs: GITHUB_SHA,DOCKER_IMAGE
           script: |
             # Создание директории, если она не существует
-            mkdir -p /root/work_exp_decustom_go
+            mkdir -p /root/work_exp/decustom_go
             
             # Переход в директорию
-            cd /opt/decustom_go
+            cd /root/work_exp_decustom_go
             
             # Создание или обновление docker-compose.yml
             cat > docker-compose.yml << 'EOL'
